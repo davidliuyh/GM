@@ -39,38 +39,40 @@ Cell[BoxData[{
  RowBox[{
   RowBox[{
    RowBox[{"Num", "=", "200"}], ";"}], 
-  RowBox[{"(*", 
-   RowBox[{"evaluate", " ", "Num", " ", "points"}], "*)"}]}], "\[IndentingNewLine]", 
+  RowBox[{"(*",
+   RowBox[{"evaluate", " ", "Num", " ", "points"}], "*)"}]}], "\[IndentingNewLine]",
  RowBox[{
   RowBox[{
-   RowBox[{"RStart", "=", "38"}], ";"}], 
-  RowBox[{"(*", 
+   RowBox[{"RStart", "=", "38"}], ";"}],
+  RowBox[{"(*",
    RowBox[{
-    RowBox[{"start", " ", "at", " ", "R"}], "=", 
-    RowBox[{"10", "Rb0"}]}], "*)"}]}], "\[IndentingNewLine]", 
+    RowBox[{"start", " ", "at", " ", "R"}], "=",
+    RowBox[{"10", "Rb0"}]}], "*)"}]}], "\[IndentingNewLine]",
  RowBox[{
   RowBox[{
-   RowBox[{"REnd", "=", "10"}], ";"}], 
-  RowBox[{"(*", 
+   RowBox[{"REnd", "=", "10"}], ";"}],
+  RowBox[{"(*",
    RowBox[{
-    RowBox[{"end", " ", "at", " ", "R"}], "=", 
-    RowBox[{"38", "Rb0"}]}], "*)"}]}], "\[IndentingNewLine]", 
+    RowBox[{"end", " ", "at", " ", "R"}], "=",
+    RowBox[{"38", "Rb0"}]}], "*)"}]}], "\[IndentingNewLine]",
  RowBox[{
   RowBox[{
-   RowBox[{"RValues", "=", 
-    RowBox[{"Subdivide", "[", 
-     RowBox[{"REnd", ",", "RStart", ",", 
-      RowBox[{"Num", "-", "1"}]}], "]"}]}], ";"}], 
-  RowBox[{"(*", 
-   RowBox[{"separations", " ", "to", " ", "evaluate"}], "*)"}]}], "\[IndentingNewLine]", 
+   RowBox[{"RValues", "=",
+    RowBox[{"Subdivide", "[",
+     RowBox[{"REnd", ",", "RStart", ",",
+      RowBox[{"Num", "-", "1"}]}], "]"}]}], ";"}],
+  RowBox[{"(*",
+   RowBox[{"separations", " ", "to", " ", "evaluate"}], "*)"}]}], "\[IndentingNewLine]",
  RowBox[{
   RowBox[{
-   RowBox[{"\[CapitalDelta]R", "=", 
-    RowBox[{"N", "[", 
+   RowBox[{"\[CapitalDelta]R", "=",
+    RowBox[{"N", "[",
      RowBox[{
-      RowBox[{"(", 
-       RowBox[{"RStart", "-", "REnd"}], ")"}], "/", "Num"}], "]"}]}], ";"}], 
-  "\[IndentingNewLine]"}], "\[IndentingNewLine]", 
+      RowBox[{"(",
+       RowBox[{"RStart", "-", "REnd"}], ")"}], "/",
+      RowBox[{"(",
+       RowBox[{"Num", "-", "1"}], ")"}]}], "]"}]}], ";"}],
+  "\[IndentingNewLine]"}], "\[IndentingNewLine]",
  RowBox[{
   RowBox[{
    RowBox[{"NotebookEvaluate", "[", 
