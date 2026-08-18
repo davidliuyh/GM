@@ -1,51 +1,51 @@
-# Mathematica v2 与 Python v2 的差异备忘
+# Mathematica v2 and Python v2 Differences
 
-本文只记录 Mathematica v2 与 Python v2 的差异，作为后续核对用的 memory。
+This note records differences between the Mathematica v2 and Python v2 implementations for future verification.
 
-## 对应实现
+## Corresponding Implementations
 
-- Mathematica v2：`Mathematica/v2/GMCalcLib_v2.0.nb`、`GMMain_v2.0.nb`、`GMMainPlot_v2.0.nb` 及其导出的 `.m` 数据。
-- Python v2：`src/v2/gmlib.py` 及 `src/v2/` 下的 notebook。
+- Mathematica v2: `Mathematica/v2/GMCalcLib_v2.0.nb`, `GMMain_v2.0.nb`, `GMMainPlot_v2.0.nb`, and their exported `.m` data.
+- Python v2: `src/v2/gmlib.py` and the notebooks under `src/v2/`.
 
-## 物理定义
+## Physical Definitions
 
-两者采用相同的六态基底、哈密顿量 `H`、`dH/dOmega`、`omegaLz`、位置和二阶矩算符、GW 频率、质量四极矩与 GR 辐射功率组合。Python 中对应的 GR 组合保留了 `-16 Qxx (Qxy + Qyy)`。云团实验室系能量、修正后的增长宽度、导数规则和取整常数也与 Mathematica v2 对齐。
+Both implementations use the same six-state basis, Hamiltonian `H`, `dH/dOmega`, `omegaLz`, position and second-moment operators, GW frequency, mass quadrupole, and GR radiation-power combination. The corresponding Python GR expression retains `-16 Qxx (Qxy + Qyy)`. The cloud energy in the laboratory frame, corrected growth widths, derivative rules, and rounded constants also match Mathematica v2.
 
-## 积分实现
+## Integration Implementation
 
-Mathematica v2 使用解析积分与 `NIntegrate` 混合方案；数值部分对每个本征态分别在 `[-2R,2R]^3` 上使用 `LocalAdaptive`。
+Mathematica v2 combines analytic integration with `NIntegrate`; the numerical part applies `LocalAdaptive` separately to each eigenstate over `[-2R,2R]^3`.
 
-Python v2 使用确定性的张量积 Gauss–Legendre 求积，并在两个云团中心和原点附近分区；位置及二阶矩先构造成可复用的算符矩阵，最后显式 Hermitian 化。因此，两者公式相同，但数值积分的稳定性和误差特征不同。
+Python v2 uses deterministic tensor-product Gauss-Legendre quadrature, partitioned near both cloud centers and the origin. Position and second-moment quantities are first constructed as reusable operator matrices and are explicitly Hermitianized. The formulas are therefore the same, but the numerical stability and error characteristics differ.
 
-## 基础矩阵的数值差异
+## Numerical Differences in the Base Matrices
 
-比较条件：`q=0.99`、200 个点、`R ∈ [10,38]`。
+Comparison conditions: `q=0.99`, 200 points, and `R ∈ [10,38]`.
 
-| 数量 | 最大绝对差 | RMS 差 | 相对整体尺度 |
+| Quantity | Maximum absolute difference | RMS difference | Relative global scale |
 |---|---:|---:|---:|
 | `H` | 1.1478157645222059e-05 | 8.115145670131352e-07 | 3.881864931370566e-05 |
 | `omegaLz` | 1.5628858649821553e-06 | 1.4291497713612603e-07 | 1.647561336951389e-05 |
 | `dH/dOmega` | 1.9014375179382537e-04 | 1.2512458112510676e-05 | 5.949620445096506e-05 |
 
-## 位置期望值
+## Position Expectation Values
 
-`Xc` 的最大绝对差为 `1.9116056651851e-03`，RMS 差为 `2.808246677041545e-04`。
+The maximum absolute difference in `Xc` is `1.9116056651851e-03`, and the RMS difference is `2.808246677041545e-04`.
 
-例如 `R=38` 的第 1 态：Python v2 为 `-18.904151922579`，Mathematica v2 约为 `-18.90426392`，绝对差约 `1.12e-04`。
+For example, for state 1 at `R=38`, Python v2 gives `-18.904151922579`, while Mathematica v2 gives approximately `-18.90426392`, an absolute difference of about `1.12e-04`.
 
-## Mathematica v2 的大 R 四极矩失效
+## Mathematica v2 Quadrupole Failure at Large R
 
-在 `R=38`，Python v2 的六态 `Qyy` 为
+At `R=38`, the six Python v2 `Qyy` values are
 
-`[11.8324166254, 12.0686080382, 13.9459837059, 14.2342187741, 12.1553864820, 12.4082566624]`。
+`[11.8324166254, 12.0686080382, 13.9459837059, 14.2342187741, 12.1553864820, 12.4082566624]`.
 
-Mathematica v2 保存的数据为
+The values saved by Mathematica v2 are
 
-`[5.2554e-13, 7.7919e-13, 2.2754e-12, 3.3120e-12, 5.3365e-13, 7.8994e-13]`。
+`[5.2554e-13, 7.7919e-13, 2.2754e-12, 3.3120e-12, 5.3365e-13, 7.8994e-13]`.
 
-各态相对误差首次超过 10% 的位置如下（索引从 0 开始）：
+The first location where the relative error exceeds 10% for each state is:
 
-| 态 | 索引 | R |
+| State | Zero-based index | R |
 |---:|---:|---:|
 | 1 | 180 | 35.32663317 |
 | 2 | 182 | 35.60804020 |
@@ -54,71 +54,65 @@ Mathematica v2 保存的数据为
 | 5 | 180 | 35.32663317 |
 | 6 | 182 | 35.60804020 |
 
-从源码和保存数据判断，原因是 Mathematica 的 `LocalAdaptive` 在随 R 增大的立方体区域上漏掉了远离原点、但高度局域的波包；原始 `.m` 文件没有保留积分警告，因此这是基于实现与数据行为的诊断。`Qxx` 和 `Qzz` 在同一区域仍较合理，但错误的 `Qyy` 会继续污染质量四极矩和 `PGR`。大 R 时不应把 Mathematica v2 保存的 `Qc` 当作数值基准。
+The source and saved data indicate that Mathematica's `LocalAdaptive` misses highly localized wave packets far from the origin as the cubic integration domain grows with R. The original `.m` files do not retain integration warnings, so this is a diagnosis based on the implementation and data behavior. `Qxx` and `Qzz` remain reasonable over the same region, but the incorrect `Qyy` propagates into the mass quadrupole and `PGR`. At large R, the Mathematica v2 `Qc` data should not be treated as a numerical reference.
 
-## 本征态标号
+## Eigenstate Labels
 
-Mathematica v2 在每个 R 点独立调用 `Eigensystem`；绘图代码只有相位/符号处理，没有全局的态置换跟踪。
+Mathematica v2 calls `Eigensystem` independently at each R. Its plotting code adjusts only phases and signs and does not globally track state permutations.
 
-Python v2 使用相邻 R 点本征矢重叠和 Hungarian 匹配追踪六条本征态，并把同一置换同步应用到后续物理量。因此，在避免交叉附近错标方面，Python v2 更明确。
+Python v2 tracks all six eigenstates using eigenvector overlaps at adjacent R points and Hungarian matching, then applies the same permutation to downstream physical quantities. Python v2 is therefore more explicit about preventing incorrect labels near crossings.
 
-## 数据布局与缓存
+## Data Layout and Caching
 
-- Mathematica v2 数据常为“态优先”，并分散在多个 `.m` 文件中。
-- Python v2 数据为“R 点优先”，集中存入一个 NPZ 缓存，并包含形状、有限性、Hermitian 性等检查。
+- Mathematica v2 data is usually state-major and distributed across multiple `.m` files.
+- Python v2 data is R-point-major, stored in one NPZ cache, and checked for shape, finiteness, and Hermiticity.
 
-比较前必须先统一轴顺序和态标号，不能直接按原数组下标相减。
+Axis order and state labels must be aligned before comparison; arrays cannot be subtracted directly using their original indices.
 
-## R=38 处 stencil 的差异
+## Stencil Difference at R=38
 
-Mathematica v2 保存的原始网格是
+The original grid saved by Mathematica v2 is
 
-`xValues = Subdivide[10, 38, 199]`，
+`xValues = Subdivide[10, 38, 199]`,
 
-即 200 个点、199 个区间，步长为
+which contains 200 points and 199 intervals with spacing
 
-`ΔR = 28/199 = 0.14070351758793898`。
+`ΔR = 28/199 = 0.14070351758793898`.
 
-由于 `R=38` 是该网格的右端点，Mathematica v2 的
-`NumericalDerivatives` 在这里使用一阶后向差分：
+Because `R=38` is the right endpoint of this grid, Mathematica v2 applies a first-order backward difference in `NumericalDerivatives`:
 
-`F'(38) ≈ [F(38) - F(38-ΔR)]/ΔR`。
+`F'(38) ≈ [F(38) - F(38-ΔR)]/ΔR`.
 
-刚扩展的 Python v2 保留这 200 个原始点，并在右端额外计算一个点
+The extended Python v2 grid retains these 200 original points and evaluates one additional point at the right edge:
 
-`38+ΔR = 38.14070351758794`。
+`38+ΔR = 38.14070351758794`.
 
-因此扩展后的 Python v2 有 201 个点、200 个区间；在 `R=38` 使用的
-局部三点 stencil 是
+The extended Python v2 grid therefore contains 201 points and 200 intervals. At `R=38`, its local three-point stencil is
 
-`[37.85929648241206, 38, 38.14070351758794]`，
+`[37.85929648241206, 38, 38.14070351758794]`,
 
-对应中心差分
+which gives the centered difference
 
-`F'(38) ≈ [F(38+ΔR) - F(38-ΔR)]/(2ΔR)`。
+`F'(38) ≈ [F(38+ΔR) - F(38-ΔR)]/(2ΔR)`.
 
-这项修改不改变原始 200 个 bin 上直接积分得到的 `H`、`omegaLz`、
-`dH/dOmega`、`Xc` 和 `Qc`。它只改变依赖 R 导数的量，包括本征能量
-导数、云团/系统能量导数、GW 频率，以及由频率计算的 `PGR` 和轨道演化
-时间。
+This change does not affect `H`, `omegaLz`, `dH/dOmega`, `Xc`, or `Qc`, which are integrated directly on the original 200 bins. It changes only quantities that depend on R derivatives, including eigenenergy derivatives, cloud and system energy derivatives, GW frequencies, `PGR` derived from those frequencies, and the orbital evolution time.
 
-因此在 `R=38` 比较 Mathematica v2 和扩展后的 Python v2 时：
+Consequently, when comparing Mathematica v2 and the extended Python v2 implementation at `R=38`:
 
-- 直接积分量应在相同的原始 bin 上比较；
-- 导数量若分别沿用各自实现，Mathematica 是后向差分，Python 是中心差分，
-  出现差异是预期行为；
-- 若要验证公式本身，必须先让两边采用完全相同的 stencil 和差分公式。
+- Directly integrated quantities should be compared on the same original bins.
+- If each implementation retains its own derivative rule, Mathematica uses a backward difference and Python uses a centered difference, so discrepancies are expected.
+- To verify the formulas themselves, both implementations must use exactly the same stencil and difference formula.
 
-## 演化求解
+## Evolution Solver
 
-Mathematica v2 使用 `Interpolation`、`NDSolve` 和 `WhenEvent`；已保存输出中可见事件定位的收敛警告。
+Mathematica v2 uses `Interpolation`, `NDSolve`, and `WhenEvent`; event-location convergence warnings appear in its saved output.
 
-Python v2 使用 `CubicSpline` 和 `solve_ivp`，显式检测转向点，并加入边界保护和 Simpson 估计。两者的停止事件和插值误差不完全相同，因此轨道演化终点附近可能出现数值差别。
+Python v2 uses `CubicSpline` and `solve_ivp`, explicitly detects turning points, and adds boundary guards and a Simpson estimate. The stopping events and interpolation errors are not identical, so numerical differences may appear near the end of orbital evolution.
 
-## 默认参数与覆盖范围
+## Default Parameters and Coverage
 
-- Mathematica v2 绘图默认值：`M1=100`、`alpha=0.06`、`mc=0.1`、200 点、`R ∈ [10,38]`。
-- Python v2 绘图当前默认值：`M1=100`、`alpha=0.1`、`mc=0.01`、100 点、`R ∈ [100,200]`。
-- Python v2 notebook 只覆盖到 Mathematica 绘图流程中 LISA 噪声段之前，并未复现后面的全部绘图单元。
+- Mathematica v2 plotting defaults: `M1=100`, `alpha=0.06`, `mc=0.1`, 200 points, and `R ∈ [10,38]`.
+- Current Python v2 plotting defaults: `M1=100`, `alpha=0.1`, `mc=0.01`, 100 points, and `R ∈ [100,200]`.
+- The Python v2 notebook covers only the Mathematica plotting workflow before the LISA noise section and does not reproduce all later plotting cells.
 
-因此，比较输出前必须显式统一质量、耦合、云质量、R 网格、态编号和单位约定。
+Masses, coupling, cloud mass, the R grid, state labels, and unit conventions must therefore be aligned explicitly before comparing outputs.

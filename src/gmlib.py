@@ -16,7 +16,7 @@ last eigenvector axis follows the basis ordering
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from math import factorial
 from typing import Sequence
@@ -32,6 +32,11 @@ from v2.gmlib import __all__ as _V2_ALL
 
 FloatArray = NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
+
+
+class EigenvalueDegeneracyError(RuntimeError):
+    """Raised when two complex eigenvalues are numerically degenerate."""
+
 
 _BASIS_STATES: tuple[tuple[int, int, int], ...] = (
     (2, 0, 0),
@@ -211,6 +216,14 @@ class TrackedEigensystem:
     right_vectors: ComplexArray
     left_bras: ComplexArray
     permutations: NDArray[np.int64]
+    reference_overlaps: FloatArray | None = None
+    minimum_relative_eigenvalue_gap: float = np.inf
+
+    @property
+    def minimum_reference_overlap(self) -> float:
+        if self.reference_overlaps is None:
+            return 1.0
+        return float(np.min(self.reference_overlaps))
 
     @property
     def biorthogonality(self) -> ComplexArray:
@@ -318,24 +331,207 @@ def _compute_iteration_point(
     return hamiltonian, dh_domega, omega_lz, moments
 
 
+def _iteration_integral_geometry(
+    kind: str,
+    mass_ratio: float,
+    separation: float,
+    settings: _v2.IntegrationSettings,
+) -> tuple[int, FloatArray, FloatArray]:
+    """Return quadrature geometry for one iteration integral kind."""
+
+    if kind == "operator":
+        limit = settings.operator_limit
+        order = settings.operator_order
+        centers = (-separation, 0.0, separation)
+    elif kind == "moment":
+        limit = settings.moment_limit_factor * separation
+        order = settings.moment_order
+        rho_primary = mass_ratio * separation / (1.0 + mass_ratio)
+        rho_secondary = separation / (1.0 + mass_ratio)
+        centers = (-rho_primary, 0.0, rho_secondary)
+    else:
+        raise ValueError(f"unknown iteration integral kind {kind!r}")
+    x_edges = _v2._partition_edges(
+        limit, centers, settings.exclusion_delta
+    )
+    transverse_edges = _v2._partition_edges(
+        limit, (0.0,), settings.exclusion_delta
+    )
+    return order, x_edges, transverse_edges
+
+
+def _compute_iteration_integral_chunk(
+    arguments: tuple[
+        str, float, float, _v2.IntegrationSettings, int, int
+    ],
+) -> ComplexArray:
+    """Integrate a contiguous range of x nodes for one stencil point."""
+
+    kind, mass_ratio, separation, settings, start, stop = arguments
+    order, x_edges, transverse_edges = _iteration_integral_geometry(
+        kind, mass_ratio, separation, settings
+    )
+    x_nodes, x_weights = _v2._composite_gauss_legendre(x_edges, order)
+    y_nodes, y_weights = _v2._composite_gauss_legendre(
+        transverse_edges, order
+    )
+    z_nodes, z_weights = _v2._composite_gauss_legendre(
+        transverse_edges, order
+    )
+    y_grid, z_grid = np.meshgrid(y_nodes, z_nodes, indexing="ij")
+    y_flat = y_grid.ravel()
+    z_flat = z_grid.ravel()
+    transverse_weights = (
+        y_weights[:, None] * z_weights[None, :]
+    ).ravel()
+    integrand = (
+        _v2._operator_integrand
+        if kind == "operator"
+        else _v2._moment_integrand
+    )
+
+    contributions = []
+    for x_value, x_weight in zip(
+        x_nodes[start:stop], x_weights[start:stop]
+    ):
+        points = np.column_stack(
+            [np.full(y_flat.size, x_value), y_flat, z_flat]
+        )
+        values = integrand(points, mass_ratio, separation)
+        contributions.append(
+            x_weight
+            * np.einsum(
+                "n,n...->...", transverse_weights, values, optimize=True
+            )
+        )
+    return np.asarray(contributions, dtype=np.complex128)
+
+
+def _compute_iteration_tables_fine_grained(
+    state: IterationState,
+    separation: FloatArray,
+    settings: _v2.IntegrationSettings,
+    executor: Executor,
+) -> IterationTables:
+    """Use x-node chunks so a three-point stencil can occupy many CPUs."""
+
+    workers = settings.resolved_workers
+    operator_chunks = max(1, workers // 4)
+    moment_chunks = max(1, workers // 16)
+    tasks = []
+    keys = []
+    for point_index, radius in enumerate(separation):
+        for kind, requested_chunks in (
+            ("operator", operator_chunks),
+            ("moment", moment_chunks),
+        ):
+            order, x_edges, _ = _iteration_integral_geometry(
+                kind, state.mass_ratio, float(radius), settings
+            )
+            x_nodes, _ = _v2._composite_gauss_legendre(x_edges, order)
+            chunks = np.array_split(
+                np.arange(x_nodes.size), min(requested_chunks, x_nodes.size)
+            )
+            for indices in chunks:
+                start = int(indices[0])
+                stop = int(indices[-1]) + 1
+                tasks.append(
+                    (
+                        kind,
+                        state.mass_ratio,
+                        float(radius),
+                        settings,
+                        start,
+                        stop,
+                    )
+                )
+                keys.append((point_index, kind, start))
+
+    chunk_values = list(executor.map(
+        _compute_iteration_integral_chunk, tasks, chunksize=1
+    ))
+    grouped: dict[tuple[int, str], list[tuple[int, ComplexArray]]] = {}
+    for (point_index, kind, start), values in zip(keys, chunk_values):
+        grouped.setdefault((point_index, kind), []).append((start, values))
+
+    point_results = []
+    for point_index in range(separation.size):
+        integrated = {}
+        for kind in ("operator", "moment"):
+            total = None
+            for _, values in sorted(grouped[(point_index, kind)]):
+                for current in values:
+                    total = current if total is None else total + current
+            if total is None:
+                raise RuntimeError("empty fine-grained integration result")
+            integrated[kind] = total
+        operators = tuple(
+            _v2._hermitian_from_upper(matrix)
+            for matrix in integrated["operator"]
+        )
+        moments = integrated["moment"]
+        moments = 0.5 * (moments + np.swapaxes(moments.conj(), -1, -2))
+        point_results.append((*operators, moments))
+
+    hamiltonian, dh_domega, omega_lz, moments = (
+        np.stack(items) for items in zip(*point_results)
+    )
+    return IterationTables(
+        separation=separation,
+        hamiltonian_dimless=hamiltonian,
+        dh_domega=dh_domega,
+        omega_lz_dimless=omega_lz,
+        moments=moments,
+    )
+
+
 def compute_iteration_tables(
     state: IterationState,
     delta_separation: float,
     settings: _v2.IntegrationSettings | None = None,
+    *,
+    executor: Executor | None = None,
 ) -> IterationTables:
-    """Integrate all raw operators at ``R-dR``, ``R`` and ``R+dR``."""
+    """Integrate all raw operators at ``R-dR``, ``R`` and ``R+dR``.
+
+    More than three workers activates x-node chunking.  Passing a persistent
+    executor avoids creating a process pool at every adaptive iteration.
+    """
 
     integration = settings or _v2.IntegrationSettings()
     separation = make_stencil(state, delta_separation)
+    resolved_workers = integration.resolved_workers
+    if resolved_workers > separation.size:
+        owns_executor = executor is None
+        pool = executor or ProcessPoolExecutor(max_workers=resolved_workers)
+        try:
+            tables = _compute_iteration_tables_fine_grained(
+                state, separation, integration, pool
+            )
+        finally:
+            if owns_executor:
+                pool.shutdown()
+        if integration.verbose:
+            for index, radius in enumerate(separation, start=1):
+                print(f"integrated stencil {index}/3: R={radius:.10g}")
+        return tables
+
     arguments = [
         (state.mass_ratio, float(radius), integration) for radius in separation
     ]
-    workers = min(integration.resolved_workers, len(arguments))
+    workers = min(resolved_workers, len(arguments))
     if workers == 1:
         results = list(map(_compute_iteration_point, arguments))
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(_compute_iteration_point, arguments, chunksize=1))
+        owns_executor = executor is None
+        pool = executor or ProcessPoolExecutor(max_workers=workers)
+        try:
+            results = list(pool.map(
+                _compute_iteration_point, arguments, chunksize=1
+            ))
+        finally:
+            if owns_executor:
+                pool.shutdown()
     if integration.verbose:
         for index, radius in enumerate(separation, start=1):
             print(f"integrated stencil {index}/3: R={radius:.10g}")
@@ -471,15 +667,80 @@ def track_eigensystem(
     return tracked_values, tracked_vectors, permutations
 
 
+def _match_eigenvectors_to_reference(
+    reference_vectors: ArrayLike,
+    current_vectors: ArrayLike,
+) -> tuple[ComplexArray, NDArray[np.int64], FloatArray]:
+    """Globally match current row eigenvectors to reference row eigenvectors."""
+
+    reference = np.asarray(reference_vectors, dtype=np.complex128)
+    current = np.asarray(current_vectors, dtype=np.complex128)
+    if reference.shape != (6, 6) or current.shape != (6, 6):
+        raise ValueError("reference and current eigenvectors must have shape (6, 6)")
+    if not np.all(np.isfinite(reference)) or not np.all(np.isfinite(current)):
+        raise ValueError("tracking eigenvectors must be finite")
+
+    reference_norm = np.linalg.norm(reference, axis=1)
+    current_norm = np.linalg.norm(current, axis=1)
+    if np.any(reference_norm <= np.finfo(float).tiny) or np.any(
+        current_norm <= np.finfo(float).tiny
+    ):
+        raise FloatingPointError("cannot track a zero-norm eigenvector")
+    normalized_reference = reference / reference_norm[:, None]
+    normalized_current = current / current_norm[:, None]
+    overlap = np.abs(normalized_reference.conj() @ normalized_current.T)
+    previous_states, current_states = linear_sum_assignment(-overlap)
+    permutation = current_states[np.argsort(previous_states)]
+    matched = current[permutation].copy()
+    matched_overlaps = overlap[np.arange(6), permutation]
+
+    phase_overlap = np.einsum("ij,ij->i", reference.conj(), matched)
+    nonzero = np.abs(phase_overlap) > 0.0
+    matched[nonzero] *= np.exp(-1j * np.angle(phase_overlap[nonzero]))[:, None]
+    return matched, permutation.astype(np.int64), matched_overlaps
+
+
+def _eigenvalue_gap_diagnostic(
+    eigenvalues: ArrayLike,
+) -> tuple[float, int, int, int]:
+    values = np.asarray(eigenvalues, dtype=np.complex128)
+    if values.shape != (3, 6):
+        raise ValueError("eigenvalues must have shape (3, 6)")
+    best = (np.inf, -1, -1, -1)
+    for point in range(3):
+        scale = max(float(np.max(np.abs(values[point]))), np.finfo(float).tiny)
+        gap = np.abs(values[point, :, None] - values[point, None, :]) / scale
+        gap[np.eye(6, dtype=bool)] = np.inf
+        flat_index = int(np.argmin(gap))
+        first, second = np.unravel_index(flat_index, (6, 6))
+        candidate = float(gap[first, second])
+        if candidate < best[0]:
+            best = (candidate, point, int(first), int(second))
+    return best
+
+
 def diagonalize_and_track(
     hamiltonian: ArrayLike,
     widths: ArrayLike,
+    *,
+    reference_right_vectors: ArrayLike | None = None,
+    degeneracy_relative_tolerance: float = 0.0,
 ) -> TrackedEigensystem:
-    """Diagonalize each point, sort by ``-|E|``, then track as in v2."""
+    """Diagonalize and continuously label the three-point eigensystem.
+
+    With ``reference_right_vectors``, the center point is first matched to the
+    previous accepted iteration by the same global-overlap Hungarian method as
+    v2.  Both stencil sides are then matched independently to that center.
+    Without a reference, the historical ``-|E|`` seed and adjacent tracking
+    are retained for gm.ipynb compatibility.
+    """
 
     matrices = np.asarray(hamiltonian, dtype=np.complex128)
     if matrices.shape != (3, 6, 6):
         raise ValueError("hamiltonian must have shape (3, 6, 6)")
+    if degeneracy_relative_tolerance < 0.0:
+        raise ValueError("degeneracy_relative_tolerance cannot be negative")
+
     values_at_points = []
     vectors_at_points = []
     for matrix in matrices:
@@ -487,9 +748,38 @@ def diagonalize_and_track(
         order = np.argsort(-np.abs(values), kind="stable")
         values_at_points.append(values[order])
         vectors_at_points.append(vector_columns[:, order].T)
-    values, vectors, permutations = track_eigensystem(
-        np.asarray(values_at_points), np.asarray(vectors_at_points)
-    )
+    values = np.asarray(values_at_points, dtype=np.complex128)
+    vectors = np.asarray(vectors_at_points, dtype=np.complex128)
+
+    minimum_gap, gap_point, gap_first, gap_second = _eigenvalue_gap_diagnostic(values)
+    if minimum_gap <= degeneracy_relative_tolerance:
+        raise EigenvalueDegeneracyError(
+            "numerically degenerate complex eigenvalues: "
+            f"relative_gap={minimum_gap:.6g} <= "
+            f"tolerance={degeneracy_relative_tolerance:.6g}, "
+            f"stencil_point={gap_point}, raw_states=({gap_first}, {gap_second}), "
+            f"E1={values[gap_point, gap_first]!r}, "
+            f"E2={values[gap_point, gap_second]!r}"
+        )
+
+    reference_overlaps = None
+    if reference_right_vectors is None:
+        values, vectors, permutations = track_eigensystem(values, vectors)
+    else:
+        permutations = np.empty((3, 6), dtype=np.int64)
+        aligned_center, center_permutation, reference_overlaps = (
+            _match_eigenvectors_to_reference(reference_right_vectors, vectors[1])
+        )
+        values[1] = values[1, center_permutation]
+        vectors[1] = aligned_center
+        permutations[1] = center_permutation
+        for point in (0, 2):
+            aligned, permutation, _ = _match_eigenvectors_to_reference(
+                vectors[1], vectors[point]
+            )
+            values[point] = values[point, permutation]
+            vectors[point] = aligned
+            permutations[point] = permutation
 
     transpose_norm = np.einsum("nki,nki->nk", vectors, vectors, optimize=True)
     if np.any(np.abs(transpose_norm) < 1e-12):
@@ -502,8 +792,13 @@ def diagonalize_and_track(
         right_vectors=vectors,
         left_bras=left_bras,
         permutations=permutations,
+        reference_overlaps=(
+            None
+            if reference_overlaps is None
+            else np.asarray(reference_overlaps, dtype=np.float64)
+        ),
+        minimum_relative_eigenvalue_gap=minimum_gap,
     )
-
 
 def biorthogonal_expectation(
     eigensystem: TrackedEigensystem,
@@ -575,8 +870,14 @@ def compute_gw_frequency_squared(
     tables: IterationTables,
     eigensystem: TrackedEigensystem,
     cloud: CloudObservables,
+    *,
+    selected_state: int | None = None,
 ) -> FloatArray:
-    """Compute the real conservative GW frequency squared on the stencil."""
+    """Compute the real conservative GW frequency squared on the stencil.
+
+    By default every tracked state is required to be physical.  Iterative
+    evolution may instead validate only the state it actually advances.
+    """
 
     p_mass = state.primary_mass
     s_mass = state.secondary_mass
@@ -613,10 +914,19 @@ def compute_gw_frequency_squared(
     frequency_squared = np.asarray(
         numerator / denominator / np.pi**2, dtype=np.float64
     )
-    if not np.all(np.isfinite(frequency_squared)) or np.any(
-        frequency_squared <= 0.0
+    if selected_state is None:
+        values_to_validate = frequency_squared
+    else:
+        if selected_state not in range(6):
+            raise ValueError("selected_state must be in range(6)")
+        values_to_validate = frequency_squared[:, selected_state]
+    if not np.all(np.isfinite(values_to_validate)) or np.any(
+        values_to_validate <= 0.0
     ):
-        raise FloatingPointError("computed non-positive GW frequency squared")
+        scope = "selected" if selected_state is not None else "tracked"
+        raise FloatingPointError(
+            f"computed non-positive GW frequency squared for {scope} state(s)"
+        )
     return frequency_squared
 
 
@@ -650,6 +960,8 @@ def compute_mass_quadrupole(
 def compute_gr_power(
     gw_frequency_squared: ArrayLike,
     mass_quadrupole: ArrayLike,
+    *,
+    selected_state: int | None = None,
 ) -> FloatArray:
     """Compute quadrupole GW power for every stencil point and state."""
 
@@ -671,8 +983,19 @@ def compute_gr_power(
         (2.0 / 5.0) * bracket * (np.pi**2 * frequency_squared) ** 3,
         dtype=np.float64,
     )
-    if not np.all(np.isfinite(gr_power)) or np.any(gr_power <= 0.0):
-        raise FloatingPointError("computed non-positive GR power")
+    if selected_state is None:
+        values_to_validate = gr_power
+    else:
+        if selected_state not in range(6):
+            raise ValueError("selected_state must be in range(6)")
+        values_to_validate = gr_power[:, selected_state]
+    if not np.all(np.isfinite(values_to_validate)) or np.any(
+        values_to_validate <= 0.0
+    ):
+        scope = "selected" if selected_state is not None else "tracked"
+        raise FloatingPointError(
+            f"computed non-positive GR power for {scope} state(s)"
+        )
     return gr_power
 
 
@@ -751,14 +1074,23 @@ def compute_orbital_observables(
     tables: IterationTables,
     eigensystem: TrackedEigensystem,
     cloud: CloudObservables,
+    *,
+    selected_state_only: bool = False,
 ) -> OrbitalObservables:
     """Convenience composition of the separately inspectable orbital steps."""
 
+    validation_state = state.selected_state if selected_state_only else None
     frequency_squared = compute_gw_frequency_squared(
-        state, tables, eigensystem, cloud
+        state,
+        tables,
+        eigensystem,
+        cloud,
+        selected_state=validation_state,
     )
     mass_quadrupole = compute_mass_quadrupole(state, tables, cloud)
-    gr_power = compute_gr_power(frequency_squared, mass_quadrupole)
+    gr_power = compute_gr_power(
+        frequency_squared, mass_quadrupole, selected_state=validation_state
+    )
     system_energy = compute_system_energy(
         state, tables, cloud, frequency_squared
     )
@@ -855,6 +1187,7 @@ def apply_mass_exchange(
 __all__ = [
     *_V2_ALL,
     "CloudObservables",
+    "EigenvalueDegeneracyError",
     "IterationState",
     "IterationTables",
     "MassExchange",
